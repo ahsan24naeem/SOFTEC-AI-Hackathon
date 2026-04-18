@@ -83,7 +83,7 @@ class EnsembleScorer:
                 results[dim] = 5.0  # neutral default
             else:
                 raw = float(model.predict(vec)[0])
-                results[dim] = round(np.clip(raw, 0.0, 10.0), 2)
+                results[dim] = round(np.clip(raw, 0.0, 10.0), 4)
 
         composite = round(
             0.40 * results["urgency"]

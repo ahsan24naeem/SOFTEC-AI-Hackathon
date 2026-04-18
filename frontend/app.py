@@ -1,6 +1,17 @@
+import sys
+import tempfile
+from datetime import datetime, timezone
+from html import escape
+from pathlib import Path
+
 import streamlit as st
-import time
-from datetime import datetime, timedelta
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.api import EmailController
+from src.models.schemas import PipelineResult, UserProfile
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -465,83 +476,239 @@ header { background: transparent !important; }
 
 
 # ─────────────────────────────────────────────
-# MOCK DATA
+# BACKEND INTEGRATION
 # ─────────────────────────────────────────────
-def _mock_results():
-    today = datetime.today()
+@st.cache_resource(show_spinner=False)
+def _get_controller() -> EmailController:
+    return EmailController()
+
+
+def _build_user_profile() -> UserProfile:
+    semester = st.session_state.get("semester")
+    experience_level = f"Semester {semester}" if semester else None
+    return UserProfile(
+        skills=list(st.session_state.get("skills", [])),
+        experience_level=experience_level,
+        education=st.session_state.get("degree") or None,
+        location=st.session_state.get("location_pref") or None,
+        interests=list(st.session_state.get("experiences", [])),
+    )
+
+
+def _compose_eml(subject: str, body: str) -> str:
+    safe_subject = " ".join(subject.splitlines()).strip() or "Inbox Email"
+    stamp = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+    return (
+        "From: inbox@example.com\n"
+        "To: student@example.com\n"
+        f"Subject: {safe_subject}\n"
+        f"Date: {stamp}\n"
+        "MIME-Version: 1.0\n"
+        'Content-Type: text/plain; charset="utf-8"\n\n'
+        f"{body.strip()}\n"
+    )
+
+
+def _decode_text(raw: bytes) -> str:
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="ignore")
+
+
+def _prepare_eml_files(
+    pasted_text: str,
+    uploaded_files: list,
+    work_dir: Path,
+) -> list[Path]:
+    eml_paths: list[Path] = []
+
+    if pasted_text.strip():
+        pasted_path = work_dir / "pasted_input.eml"
+        pasted_path.write_text(
+            _compose_eml("Pasted Inbox Content", pasted_text),
+            encoding="utf-8",
+        )
+        eml_paths.append(pasted_path)
+
+    for idx, uploaded in enumerate(uploaded_files, start=1):
+        target = work_dir / f"uploaded_{idx}.eml"
+        raw = uploaded.getvalue()
+        suffix = Path(uploaded.name).suffix.lower()
+
+        if suffix == ".eml":
+            target.write_bytes(raw)
+        else:
+            decoded = _decode_text(raw).strip() or "No readable text found in upload."
+            target.write_text(
+                _compose_eml(uploaded.name, decoded),
+                encoding="utf-8",
+            )
+
+        eml_paths.append(target)
+
+    return eml_paths
+
+
+def _deadline_for_result(result: PipelineResult) -> datetime | None:
+    candidates: list[datetime] = []
+    candidates.extend(result.extracted_data.key_dates)
+    candidates.extend(
+        step.deadline for step in result.next_steps if step.deadline is not None
+    )
+
+    for attr in ("application_deadline", "event_date"):
+        value = getattr(result.extracted_data, attr, None)
+        if value is not None:
+            candidates.append(value)
+
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def _urgency_bucket(deadline: datetime | None, urgency_score: float) -> str:
+    if deadline is not None:
+        now = datetime.now(timezone.utc)
+        aware_deadline = (
+            deadline if deadline.tzinfo is not None else deadline.replace(tzinfo=timezone.utc)
+        )
+        days_left = (aware_deadline - now).total_seconds() / 86400
+        if days_left <= 3:
+            return "red"
+        if days_left <= 14:
+            return "yellow"
+        return "green"
+
+    if urgency_score >= 7:
+        return "red"
+    if urgency_score >= 4:
+        return "yellow"
+    return "green"
+
+
+def _match_bucket(fit_score: float) -> str:
+    if fit_score >= 7:
+        return "High"
+    if fit_score >= 4:
+        return "Medium"
+    return "Low"
+
+
+def _format_deadline(deadline: datetime | None) -> str:
+    if deadline is None:
+        return "No deadline"
+    if deadline.tzinfo is None:
+        return deadline.strftime("%d %b %Y")
+    return deadline.astimezone(timezone.utc).strftime("%d %b %Y")
+
+
+def _reason_lines(result: PipelineResult) -> list[str]:
+    reasons = [
+        f"Composite score: {result.scores.composite:.1f}/10",
+        f"Fit score: {result.scores.fit:.1f}/10",
+        f"Urgency score: {result.scores.urgency:.1f}/10",
+    ]
+    if result.link_trust:
+        avg_trust = sum(link.trust_score for link in result.link_trust) / len(result.link_trust)
+        reasons.append(f"Average link trust: {avg_trust:.1f}/10")
+    if result.warnings:
+        reasons.append(result.warnings[0])
+    return reasons
+
+
+def _result_to_card(result: PipelineResult) -> dict[str, object]:
+    deadline = _deadline_for_result(result)
+    location = (
+        getattr(result.extracted_data, "location", None)
+        or getattr(result.extracted_data, "venue", None)
+        or "Unspecified"
+    )
+    steps = [step.action for step in result.next_steps if step.action.strip()]
+    if not steps:
+        steps = ["Review the email details and confirm required actions."]
+
+    title = (
+        result.extracted_data.subject
+        or result.envelope.subject
+        or Path(result.source_file).name
+    )
+
     return {
-        "total": 12,
-        "opportunities": [
-            {
-                "title":   "Google Summer of Code 2026",
-                "type":    "Fellowship", "match": "High", "urgency": "red",
-                "deadline": (today + timedelta(days=2)).strftime("%d %b %Y"),
-                "location": "Remote",
-                "summary":  "Open-source fellowship by Google. Stipend $3,000–$6,600. Project proposal required.",
-                "reasons": [
-                    "Python skill directly matches stated requirement.",
-                    "CGPA ≥ 3.0 minimum threshold met.",
-                    "Remote — matches your location preference.",
-                    "Deadline in 2 days — immediate action needed.",
-                ],
-                "steps": [
-                    "Visit summerofcode.withgoogle.com and browse org list.",
-                    "Draft a 2-page project proposal.",
-                    "Contact a mentor from your chosen org.",
-                    "Submit via the GSoC portal before deadline.",
-                ],
-            },
-            {
-                "title":   "LUMS NOP Scholarship",
-                "type":    "Scholarship", "match": "High", "urgency": "yellow",
-                "deadline": (today + timedelta(days=10)).strftime("%d %b %Y"),
-                "location": "Lahore, Pakistan",
-                "summary":  "Full need-based scholarship covering tuition + living stipend.",
-                "reasons": [
-                    "Financial need flag set to 'Partial (stipend preferred)'.",
-                    "Location preference 'Lahore' matches programme site.",
-                    "Semester 5 within eligible range (Sem 1–6).",
-                    "CGPA well above 2.5 cut-off.",
-                ],
-                "steps": [
-                    "Download NOP application form from LUMS portal.",
-                    "Gather income certificate & family documents.",
-                    "Write 500-word personal statement.",
-                    "Submit scanned copies via email.",
-                ],
-            },
-            {
-                "title":   "Microsoft Imagine Cup 2026",
-                "type":    "Competition", "match": "Medium", "urgency": "green",
-                "deadline": (today + timedelta(days=45)).strftime("%d %b %Y"),
-                "location": "Remote / Global",
-                "summary":  "Global student tech competition. $100,000 grand prize.",
-                "reasons": [
-                    "Competition listed in preferred opportunity types.",
-                    "Python & ML skills relevant to AI track.",
-                    "Deadline 45 days away — plenty of time.",
-                    "No strict CGPA requirement; team ≤ 3 members.",
-                ],
-                "steps": [
-                    "Form a team of 2–3 students.",
-                    "Register at imaginecup.microsoft.com.",
-                    "Brainstorm an AI-for-good project idea.",
-                    "Build MVP and record a 3-minute pitch video.",
-                ],
-            },
-        ],
-        "spam": [
-            {"subject": "URGENT — Claim Your $10,000 Award Now!!",       "reason": "Phishing — no legitimate org."},
-            {"subject": "Webinar: Top 10 LinkedIn Tips for 2026",         "reason": "Informational only."},
-            {"subject": "Unsubscribe from Our Newsletter",                 "reason": "Administrative email."},
-            {"subject": "Class Schedule Update — Spring Semester",         "reason": "Internal admin notice."},
-            {"subject": "Flash Sale: 50% Off Online Courses",              "reason": "Commercial promotion."},
-            {"subject": "Follow us on Instagram!",                         "reason": "Social media marketing."},
-            {"subject": "Re: Meeting Notes from Feb Board",                "reason": "Internal memo."},
-            {"subject": "📢 Free Webinar: Crypto Investing 101",           "reason": "Unrelated commercial."},
-            {"subject": "Your Amazon order has shipped",                   "reason": "E-commerce notification."},
-        ],
+        "title": title,
+        "type": result.extracted_data.email_type.value,
+        "match": _match_bucket(result.scores.fit),
+        "urgency": _urgency_bucket(deadline, result.scores.urgency),
+        "deadline": _format_deadline(deadline),
+        "location": location,
+        "summary": result.extracted_data.summary,
+        "reasons": _reason_lines(result),
+        "steps": steps,
+        "_composite": result.scores.composite,
     }
+
+
+def _build_frontend_results(
+    processed: list[PipelineResult],
+    failures: list[dict[str, str]],
+) -> dict[str, object]:
+    opportunities: list[dict[str, object]] = []
+    spam: list[dict[str, str]] = list(failures)
+
+    for result in processed:
+        card = _result_to_card(result)
+        if card["type"] == "Misc":
+            spam.append(
+                {
+                    "subject": str(card["title"]),
+                    "reason": f"Classified as Misc (composite {result.scores.composite:.1f}/10).",
+                }
+            )
+            continue
+
+        opportunities.append(card)
+
+    opportunities.sort(key=lambda item: float(item["_composite"]), reverse=True)
+    for item in opportunities:
+        item.pop("_composite", None)
+
+    return {
+        "total": len(processed) + len(failures),
+        "opportunities": opportunities,
+        "spam": spam,
+    }
+
+
+def _analyze_with_backend(pasted_text: str, uploaded_files: list) -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix="emailforest_") as temp_dir:
+        eml_paths = _prepare_eml_files(pasted_text, uploaded_files, Path(temp_dir))
+        if not eml_paths:
+            return {"total": 0, "opportunities": [], "spam": []}
+
+        controller = _get_controller()
+        user_profile = _build_user_profile()
+
+        processed: list[PipelineResult] = []
+        failures: list[dict[str, str]] = []
+
+        for eml_path in eml_paths:
+            try:
+                processed.append(controller.process(eml_path, user_profile=user_profile))
+            except Exception as exc:
+                failures.append(
+                    {
+                        "subject": eml_path.name,
+                        "reason": f"Processing failed: {exc}",
+                    }
+                )
+
+    return _build_frontend_results(processed, failures)
+
+
+def _safe(text: object) -> str:
+    return escape(str(text))
 
 
 # ─────────────────────────────────────────────
@@ -553,6 +720,7 @@ _defaults = {
     "skills":      ["Python", "Machine Learning"],
     "experiences": ["3-month internship at XYZ"],
     "results":     None,
+    "analysis_error": None,
     "edit_skill":  None,   # which skill index is being edited
     "edit_exp":    None,   # which experience index is being edited
     "cgpa":        3.20,
@@ -737,6 +905,9 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════
 if not st.session_state["analyzed"] and not st.session_state["analyzing"]:
 
+    if st.session_state.get("analysis_error"):
+        st.error(f"Analysis failed: {st.session_state['analysis_error']}")
+
     st.markdown(f"""
     <div class="hero-wrap">
         <div style="display:inline-flex;align-items:center;gap:11px;">
@@ -765,7 +936,7 @@ if not st.session_state["analyzed"] and not st.session_state["analyzing"]:
         with tab_upload:
             uploaded_files = st.file_uploader(
                 "Drop email files",
-                type=["txt", "eml", "docx", "pdf", "msg"],
+                type=["txt", "eml"],
                 accept_multiple_files=True,
                 label_visibility="collapsed",
                 key="uploaded_files",
@@ -780,8 +951,14 @@ if not st.session_state["analyzed"] and not st.session_state["analyzing"]:
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
         if st.button("🚀  Analyze Opportunities", use_container_width=True, type="primary"):
-            st.session_state["analyzing"] = True
-            st.rerun()
+            has_pasted = bool(st.session_state.get("pasted_input", "").strip())
+            has_uploads = bool(st.session_state.get("uploaded_files"))
+            if not has_pasted and not has_uploads:
+                st.warning("Paste email text or upload at least one .eml/.txt file before analyzing.")
+            else:
+                st.session_state["analysis_error"] = None
+                st.session_state["analyzing"] = True
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -801,11 +978,19 @@ elif st.session_state["analyzing"]:
     """, unsafe_allow_html=True)
 
     with st.spinner(""):
-        time.sleep(2)   # ← swap for real AI call
+        try:
+            pasted_text = st.session_state.get("pasted_input", "")
+            uploaded_files = st.session_state.get("uploaded_files") or []
+            st.session_state["results"] = _analyze_with_backend(pasted_text, uploaded_files)
+            st.session_state["analyzed"] = True
+            st.session_state["analysis_error"] = None
+        except Exception as exc:
+            st.session_state["results"] = None
+            st.session_state["analyzed"] = False
+            st.session_state["analysis_error"] = str(exc)
+        finally:
+            st.session_state["analyzing"] = False
 
-    st.session_state["results"]   = _mock_results()
-    st.session_state["analyzing"] = False
-    st.session_state["analyzed"]  = True
     st.rerun()
 
 
@@ -840,24 +1025,34 @@ else:
         "green":  ("d-green",  "🟢 OPEN"),
     }
 
+    if not opportunities:
+        st.info("No opportunity emails were detected. Check ignored/spam below.")
+
     for i, opp in enumerate(opportunities):
-        u_cls, u_lbl = urg_map[opp["urgency"]]
-        m_cls        = match_cls[opp["match"]]
+        title = str(opp.get("title", "Untitled"))
+        match_label = str(opp.get("match", "Low"))
+        urgency_label = str(opp.get("urgency", "green"))
+        u_cls, u_lbl = urg_map.get(urgency_label, urg_map["green"])
+        m_cls = match_cls.get(match_label, "m-low")
+        deadline_text = _safe(opp.get("deadline", "No deadline"))
+        type_text = _safe(opp.get("type", "Unknown"))
+        location_text = _safe(opp.get("location", "Unspecified"))
+        summary_text = _safe(opp.get("summary", "No summary available."))
 
         with st.expander(
-            f"{rank_icons[i]}  #{i+1}: {opp['title']}   ·   {opp['match']} Match",
+            f"{rank_icons[i]}  #{i+1}: {title}   ·   {match_label} Match",
             expanded=(i == 0),
         ):
             st.markdown(f"""
             <div class="rank-hdr">
-                <span class="mbadge {m_cls}">{opp['match'].upper()} MATCH</span>
-                <span class="dpill {u_cls}">{u_lbl} &nbsp; {opp['deadline']}</span>
+                <span class="mbadge {m_cls}">{_safe(match_label.upper())} MATCH</span>
+                <span class="dpill {u_cls}">{u_lbl} &nbsp; {deadline_text}</span>
                 <span style="color:#aab1b8;font-size:0.76rem;">
-                    📌 {opp['type']} &nbsp;|&nbsp; {opp['location']}
+                    📌 {type_text} &nbsp;|&nbsp; {location_text}
                 </span>
             </div>
             <p style="color:#b7bec6;font-size:0.84rem;margin:0.35rem 0 0.75rem;">
-                {opp['summary']}
+                {summary_text}
             </p>
             """, unsafe_allow_html=True)
 
@@ -866,19 +1061,19 @@ else:
                 "letter-spacing:0.1em;color:#aab1b8;margin-bottom:4px;'>📋 Why This Ranks Here</div>",
                 unsafe_allow_html=True,
             )
-            for reason in opp["reasons"]:
+            for reason in opp.get("reasons", []):
                 st.markdown(
-                    f'<div class="ev-item"><span class="ev-icon">›</span><span>{reason}</span></div>',
+                    f'<div class="ev-item"><span class="ev-icon">›</span><span>{_safe(reason)}</span></div>',
                     unsafe_allow_html=True,
                 )
 
             st.markdown("<div style='height:7px'></div>", unsafe_allow_html=True)
 
             with st.expander("✅  Action Checklist", expanded=False):
-                for j, step in enumerate(opp["steps"], 1):
+                for j, step in enumerate(opp.get("steps", []), 1):
                     st.markdown(
                         f'<div class="step-row"><div class="step-num">{j}</div>'
-                        f'<span>{step}</span></div>',
+                        f'<span>{_safe(step)}</span></div>',
                         unsafe_allow_html=True,
                     )
 
@@ -889,15 +1084,28 @@ else:
         "letter-spacing:0.12em;color:#9ea5ae;margin-bottom:0.35rem;'>🗑️ Ignored / Spam</div>",
         unsafe_allow_html=True,
     )
-    for s in spam:
+    if not spam:
         st.markdown(
-            f'<div class="junk-row"><span>✗</span>'
-            f'<span><b style="color:#d6dbe2;">{s["subject"]}</b>'
-            f' &nbsp;—&nbsp; {s["reason"]}</span></div>',
+            '<div class="junk-row"><span>✓</span><span>No ignored emails in this run.</span></div>',
             unsafe_allow_html=True,
         )
+    else:
+        for s in spam:
+            subject_text = _safe(s.get("subject", "Untitled"))
+            reason_text = _safe(s.get("reason", "No reason provided."))
+            st.markdown(
+                f'<div class="junk-row"><span>✗</span>'
+                f'<span><b style="color:#d6dbe2;">{subject_text}</b>'
+                f' &nbsp;—&nbsp; {reason_text}</span></div>',
+                unsafe_allow_html=True,
+            )
 
     st.markdown('<div class="results-bottom-spacer"></div>', unsafe_allow_html=True)
     if st.button("🔄  Analyze New Emails", key="analyze_new_emails_fixed", use_container_width=True):
-        st.session_state.update({"analyzed": False, "analyzing": False, "results": None})
+        st.session_state.update({
+            "analyzed": False,
+            "analyzing": False,
+            "results": None,
+            "analysis_error": None,
+        })
         st.rerun()
