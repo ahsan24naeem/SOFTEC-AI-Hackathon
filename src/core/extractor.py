@@ -21,6 +21,7 @@ from src.models.schemas import (
     JobEmail,
     MiscEmail,
     RawEmailEnvelope,
+    UserProfile,
 )
 
 load_dotenv()
@@ -30,6 +31,8 @@ load_dotenv()
 SYSTEM_PROMPT = textwrap.dedent("""\
     You are an expert email analyst. Given an email's subject, sender, date,
     and body, extract ALL relevant structured data into a single JSON object.
+    If a User Profile is provided, use it only as reference for relevance context
+    and requirement matching hints. Do not invent facts not present in the email.
 
     RULES:
     1. Classify the email into exactly one type: Admission, Job, Event, or Misc.
@@ -48,6 +51,8 @@ SYSTEM_PROMPT = textwrap.dedent("""\
       "next_steps": [{"action": "...", "deadline": "ISO-8601 or null"}],
       "key_dates": ["ISO-8601", "..."],
       "links": [{"url": "...", "anchor_text": "..."}],
+    "required_documents": ["..."],
+    "contact_info": ["application email / portal / phone / contact person"],
       "confidence": 0.95,
 
       // Admission-specific (include only if email_type == "Admission"):
@@ -116,15 +121,23 @@ class LLMExtractor:
 
     # ── public API ────────────────────────────────────────────────────
 
-    def extract(self, envelope: RawEmailEnvelope) -> BaseEmailData:
-        user_prompt = self._build_user_prompt(envelope)
+    def extract(
+        self,
+        envelope: RawEmailEnvelope,
+        user_profile: UserProfile | None = None,
+    ) -> BaseEmailData:
+        user_prompt = self._build_user_prompt(envelope, user_profile=user_profile)
         raw_json = self._call_llm(user_prompt)
         parsed = self._parse_json(raw_json)
         return self._validate(parsed)
 
     # ── internals ─────────────────────────────────────────────────────
 
-    def _build_user_prompt(self, envelope: RawEmailEnvelope) -> str:
+    def _build_user_prompt(
+        self,
+        envelope: RawEmailEnvelope,
+        user_profile: UserProfile | None = None,
+    ) -> str:
         parts = [
             f"Subject: {envelope.subject}",
             f"From: {envelope.sender}",
@@ -145,6 +158,10 @@ class LLMExtractor:
             parts.append("\n— Attachments —")
             for att in envelope.attachments:
                 parts.append(f"  • {att}")
+
+        if user_profile is not None:
+            parts.append("\n— Student Profile (reference only) —")
+            parts.append(user_profile.model_dump_json())
 
         return "\n".join(parts)
 

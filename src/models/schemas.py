@@ -24,10 +24,17 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 class UserProfile(BaseModel):
     """The user's profile for deterministic requirement matching."""
+    degree_program: Optional[str] = None
+    semester: Optional[int] = None
+    cgpa: Optional[float] = Field(default=None, ge=0.0, le=4.0)
     skills: list[str] = Field(default_factory=list)
+    preferred_opportunity_types: list[str] = Field(default_factory=list)
+    financial_need: Optional[str] = None
     experience_level: Optional[str] = None
     education: Optional[str] = None
     location: Optional[str] = None
+    location_preference: Optional[str] = None
+    past_experience: list[str] = Field(default_factory=list)
     interests: list[str] = Field(default_factory=list)
 
 
@@ -117,6 +124,8 @@ class BaseEmailData(BaseModel):
     )
     key_dates: list[datetime] = Field(default_factory=list)
     links: list[LinkMetadata] = Field(default_factory=list)
+    required_documents: list[str] = Field(default_factory=list)
+    contact_info: list[str] = Field(default_factory=list)
     confidence: float = Field(
         ..., ge=0.0, le=1.0,
         description="LLM self-reported confidence in its extraction",

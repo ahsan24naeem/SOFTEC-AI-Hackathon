@@ -163,7 +163,7 @@ class LinkChecker:
             reasons.append("Host is a raw IP address")
 
         # ── Optional HTTP probe and Site Analysis
-        if self._probe or user_profile:
+        if self._probe:
             is_reachable = await self._http_probe(url)
             if not is_reachable:
                 score -= 1.0
@@ -180,6 +180,8 @@ class LinkChecker:
                             reasons.append("Site requirements did not match user profile")
                 except Exception as exc:
                     reasons.append(f"Site analysis failed: {exc}")
+        elif user_profile:
+            reasons.append("Profile-aware site analysis skipped (HTTP probe disabled)")
 
         # Clamp to [1, 10]
         score = round(max(1.0, min(10.0, score)), 1)

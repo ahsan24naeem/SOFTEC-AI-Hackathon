@@ -81,14 +81,14 @@ class EmailController:
 
         # 2 ── LLM extraction
         logger.info("Extracting structured data via LLM…")
-        extracted = self._extractor.extract(envelope)
+        extracted = self._extractor.extract(envelope, user_profile=user_profile)
 
         # 3 ── Feature engineering
         feature_vec = FeatureTransformer.transform(extracted, envelope)
 
         # 4 ── ML scoring
         logger.info("Scoring with RF ensemble…")
-        scores = self._scorer.score(extracted, envelope)
+        scores = self._scorer.score(extracted, envelope, user_profile=user_profile)
 
         # 5 ── SHAP explainability
         logger.info("Computing SHAP explanations…")

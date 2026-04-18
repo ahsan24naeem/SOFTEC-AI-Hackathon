@@ -1,5 +1,6 @@
 import sys
 import tempfile
+import re
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -484,14 +485,29 @@ def _get_controller() -> EmailController:
 
 
 def _build_user_profile() -> UserProfile:
+    degree = st.session_state.get("degree") or None
+    location_pref = st.session_state.get("location_pref") or None
     semester = st.session_state.get("semester")
     experience_level = f"Semester {semester}" if semester else None
+
+    skills = list(st.session_state.get("skills", []))
+    experiences = list(st.session_state.get("experiences", []))
+
     return UserProfile(
-        skills=list(st.session_state.get("skills", [])),
+        degree_program=degree,
+        semester=semester,
+        cgpa=st.session_state.get("cgpa"),
+        skills=skills,
+        preferred_opportunity_types=list(
+            st.session_state.get("preferred_opportunity_types", [])
+        ),
+        financial_need=st.session_state.get("financial_need") or None,
         experience_level=experience_level,
-        education=st.session_state.get("degree") or None,
-        location=st.session_state.get("location_pref") or None,
-        interests=list(st.session_state.get("experiences", [])),
+        education=degree,
+        location=location_pref,
+        location_preference=location_pref,
+        past_experience=experiences,
+        interests=skills,
     )
 
 
@@ -518,6 +534,44 @@ def _decode_text(raw: bytes) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
+def _extract_subject_from_text(text: str, fallback: str) -> str:
+    for line in text.splitlines()[:40]:
+        if line.lower().startswith("subject:"):
+            return line.split(":", 1)[1].strip() or fallback
+    return fallback
+
+
+def _split_batch_text_emails(text: str) -> list[str]:
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+
+    # Split on common delimiter bars used in pasted inbox dumps.
+    chunks = [
+        chunk.strip()
+        for chunk in re.split(r"\n(?:-{3,}|={3,}|_{3,})\n", cleaned)
+        if chunk.strip()
+    ]
+
+    if len(chunks) > 1:
+        return chunks
+
+    # Fallback: split on repeated "From:" boundaries.
+    lines = cleaned.splitlines()
+    grouped: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        if line.strip().lower().startswith("from:") and current:
+            grouped.append("\n".join(current).strip())
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        grouped.append("\n".join(current).strip())
+
+    return [chunk for chunk in grouped if chunk]
+
+
 def _prepare_eml_files(
     pasted_text: str,
     uploaded_files: list,
@@ -525,31 +579,53 @@ def _prepare_eml_files(
 ) -> list[Path]:
     eml_paths: list[Path] = []
 
-    if pasted_text.strip():
-        pasted_path = work_dir / "pasted_input.eml"
+    pasted_chunks = _split_batch_text_emails(pasted_text)
+    for idx, chunk in enumerate(pasted_chunks, start=1):
+        pasted_path = work_dir / f"pasted_{idx}.eml"
         pasted_path.write_text(
-            _compose_eml("Pasted Inbox Content", pasted_text),
+            _compose_eml(_extract_subject_from_text(chunk, f"Pasted Email {idx}"), chunk),
             encoding="utf-8",
         )
         eml_paths.append(pasted_path)
 
     for idx, uploaded in enumerate(uploaded_files, start=1):
-        target = work_dir / f"uploaded_{idx}.eml"
         raw = uploaded.getvalue()
         suffix = Path(uploaded.name).suffix.lower()
 
         if suffix == ".eml":
+            target = work_dir / f"uploaded_{idx}.eml"
             target.write_bytes(raw)
+            eml_paths.append(target)
         else:
             decoded = _decode_text(raw).strip() or "No readable text found in upload."
-            target.write_text(
-                _compose_eml(uploaded.name, decoded),
-                encoding="utf-8",
-            )
-
-        eml_paths.append(target)
+            chunks = _split_batch_text_emails(decoded) or [decoded]
+            for sub_idx, chunk in enumerate(chunks, start=1):
+                target = work_dir / f"uploaded_{idx}_{sub_idx}.eml"
+                target.write_text(
+                    _compose_eml(
+                        _extract_subject_from_text(chunk, f"{uploaded.name} #{sub_idx}"),
+                        chunk,
+                    ),
+                    encoding="utf-8",
+                )
+                eml_paths.append(target)
 
     return eml_paths
+
+
+def _count_candidate_emails(pasted_text: str, uploaded_files: list) -> int:
+    count = len(_split_batch_text_emails(pasted_text))
+    for uploaded in uploaded_files:
+        suffix = Path(uploaded.name).suffix.lower()
+        if suffix == ".eml":
+            count += 1
+            continue
+
+        decoded = _decode_text(uploaded.getvalue())
+        chunks = _split_batch_text_emails(decoded)
+        count += len(chunks) if chunks else 1
+
+    return count
 
 
 def _deadline_for_result(result: PipelineResult) -> datetime | None:
@@ -614,6 +690,25 @@ def _reason_lines(result: PipelineResult) -> list[str]:
     if result.link_trust:
         avg_trust = sum(link.trust_score for link in result.link_trust) / len(result.link_trust)
         reasons.append(f"Average link trust: {avg_trust:.1f}/10")
+
+    admission_reqs = getattr(result.extracted_data, "requirements", [])
+    if admission_reqs:
+        reasons.append(f"Eligibility requirements: {', '.join(admission_reqs[:3])}")
+
+    required_skills = getattr(result.extracted_data, "required_skills", [])
+    if required_skills:
+        reasons.append(f"Required skills: {', '.join(required_skills[:4])}")
+
+    required_documents = getattr(result.extracted_data, "required_documents", [])
+    if required_documents:
+        reasons.append(
+            f"Required documents: {', '.join(required_documents[:4])}"
+        )
+
+    contact_info = getattr(result.extracted_data, "contact_info", [])
+    if contact_info:
+        reasons.append(f"Contact / apply via: {', '.join(contact_info[:3])}")
+
     if result.warnings:
         reasons.append(result.warnings[0])
     return reasons
@@ -718,6 +813,7 @@ _defaults = {
     "analyzed":    False,
     "analyzing":   False,
     "skills":      ["Python", "Machine Learning"],
+    "preferred_opportunity_types": ["Scholarship", "Internship", "Competition"],
     "experiences": ["3-month internship at XYZ"],
     "results":     None,
     "analysis_error": None,
@@ -839,6 +935,11 @@ with st.sidebar:
         ["None", "Partial (stipend preferred)", "Full (funded only)", "Critical"],
         key="financial_need",
     )
+    st.multiselect(
+        "Preferred Opportunity Types",
+        ["Scholarship", "Internship", "Competition", "Admission", "Fellowship", "Job", "Event"],
+        key="preferred_opportunity_types",
+    )
     st.text_input(
         "Location Preference",
         placeholder="e.g. Remote, Lahore, USA…",
@@ -952,13 +1053,24 @@ if not st.session_state["analyzed"] and not st.session_state["analyzing"]:
 
         if st.button("🚀  Analyze Opportunities", use_container_width=True, type="primary"):
             has_pasted = bool(st.session_state.get("pasted_input", "").strip())
-            has_uploads = bool(st.session_state.get("uploaded_files"))
+            uploads = st.session_state.get("uploaded_files") or []
+            has_uploads = bool(uploads)
             if not has_pasted and not has_uploads:
                 st.warning("Paste email text or upload at least one .eml/.txt file before analyzing.")
             else:
-                st.session_state["analysis_error"] = None
-                st.session_state["analyzing"] = True
-                st.rerun()
+                total_emails = _count_candidate_emails(
+                    st.session_state.get("pasted_input", ""),
+                    uploads,
+                )
+                if total_emails < 1 or total_emails > 15:
+                    st.warning(
+                        "For the SOFTEC demo, provide between 5 and 15 emails/text notices "
+                        f"(currently detected: {total_emails})."
+                    )
+                else:
+                    st.session_state["analysis_error"] = None
+                    st.session_state["analyzing"] = True
+                    st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════
