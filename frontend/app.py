@@ -631,43 +631,90 @@ def _count_candidate_emails(pasted_text: str, uploaded_files: list) -> int:
     return count
 
 
+def _to_aware(dt: datetime) -> datetime:
+    """Coerce a naive datetime to UTC-aware (assume UTC if no tzinfo)."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def _deadline_for_result(result: PipelineResult) -> datetime | None:
-    candidates: list[datetime] = []
-    candidates.extend(result.extracted_data.key_dates)
-    candidates.extend(
-        step.deadline for step in result.next_steps if step.deadline is not None
-    )
+    """
+    Return the single most relevant FUTURE actionable deadline for this email.
 
-    for attr in ("application_deadline", "event_date"):
-        value = getattr(result.extracted_data, attr, None)
-        if value is not None:
-            candidates.append(value)
+    Priority ladder (evaluated in order):
+      1. application_deadline   — explicit "apply by" field on Job/Admission emails.
+                                  This IS an action deadline by definition.
+      2. next_steps[].deadline  — LLM-extracted action-item deadlines.
+                                  For events this captures the *registration* deadline
+                                  (e.g. "Register by Apr 25") rather than event_date.
+      3. event_date             — when the event actually occurs; only used as a
+                                  fallback when no registration deadline was found.
+      4. key_dates              — any other dates mentioned (program starts, email
+                                  send date, orientation, etc.); last resort.
 
-    if not candidates:
-        return None
+    Past dates are ignored at every level — a missed deadline doesn't make an
+    email URGENT; the ML urgency score handles that case instead.
+    """
+    now = datetime.now(timezone.utc)
 
-    # Normalize all to UTC-aware before calling min() — mixing naive and aware
-    # datetimes raises TypeError: "can't compare offset-naive and offset-aware datetimes"
-    aware = [
-        dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
-        for dt in candidates
+    def _is_future(dt: datetime) -> bool:
+        return _to_aware(dt) > now
+
+    # ── Priority 1: application_deadline only (explicit action deadline) ──
+    app_dl = getattr(result.extracted_data, "application_deadline", None)
+    if app_dl is not None and _is_future(app_dl):
+        return _to_aware(app_dl)
+
+    # ── Priority 2: next_steps action deadlines (covers registration dls) ─
+    p2 = [
+        _to_aware(step.deadline)
+        for step in result.next_steps
+        if step.deadline is not None and _is_future(step.deadline)
     ]
-    return min(aware)
+    if p2:
+        return min(p2)
+
+    # ── Priority 3: event_date (when it happens, not when to act) ─────────
+    ev_dt = getattr(result.extracted_data, "event_date", None)
+    if ev_dt is not None and _is_future(ev_dt):
+        return _to_aware(ev_dt)
+
+    # ── Priority 4: key_dates (last resort, future only) ──────────────────
+    p4 = [
+        _to_aware(dt)
+        for dt in result.extracted_data.key_dates
+        if _is_future(dt)
+    ]
+    if p4:
+        return min(p4)
+
+    # No actionable future deadline → caller falls back to ML urgency score
+    return None
 
 
 def _urgency_bucket(deadline: datetime | None, urgency_score: float) -> str:
+    """
+    Map a deadline + ML urgency score to a colour bucket.
+
+    If a future deadline exists, urgency is deadline-driven:
+      🔴 red    → ≤ 3 days left
+      🟡 yellow → ≤ 14 days left
+      🟢 green  → > 14 days left
+
+    If no future deadline was found, fall back to the ML urgency score:
+      🔴 red    → score ≥ 7
+      🟡 yellow → score ≥ 4
+      🟢 green  → score < 4
+    """
     if deadline is not None:
         now = datetime.now(timezone.utc)
-        aware_deadline = (
-            deadline if deadline.tzinfo is not None else deadline.replace(tzinfo=timezone.utc)
-        )
-        days_left = (aware_deadline - now).total_seconds() / 86400
+        days_left = (_to_aware(deadline) - now).total_seconds() / 86_400
         if days_left <= 3:
             return "red"
         if days_left <= 14:
             return "yellow"
         return "green"
 
+    # No future deadline — use ML score as proxy
     if urgency_score >= 7:
         return "red"
     if urgency_score >= 4:

@@ -70,12 +70,33 @@ class SHAPExplainer:
                 self._explainers[key] = shap.TreeExplainer(model)
 
             exp = self._explainers[key]
-            shap_values = exp.shap_values(vec)  # shape (1, n_features)
-            base = float(exp.expected_value)
+            shap_values = exp.shap_values(vec, check_additivity=False)
+
+            # ── Normalise shap_values to a 1-D array of length n_features ──
+            # SHAP return shapes vary by version:
+            #   • Old (≤0.44): ndarray shape (n_samples, n_features)
+            #   • New (≥0.45): list of arrays OR ndarray (n_outputs, n_samples, n_features)
+            shap_arr = np.array(shap_values)
+            if shap_arr.ndim == 3:
+                # (n_outputs, n_samples, n_features) → take first output, first sample
+                contribs_1d = shap_arr[0, 0, :]
+            elif shap_arr.ndim == 2:
+                # (n_samples, n_features) → take first sample
+                contribs_1d = shap_arr[0, :]
+            elif shap_arr.ndim == 1:
+                # Already 1-D (n_features,)
+                contribs_1d = shap_arr
+            else:
+                contribs_1d = shap_arr.flatten()
+
+            # ── Normalise expected_value to a Python float ──────────────────
+            # Some SHAP versions return an ndarray for expected_value
+            ev = exp.expected_value
+            base = float(np.asarray(ev).flat[0])
 
             contributions: dict[str, float] = {}
             for i, name in enumerate(FEATURE_NAMES):
-                val = float(shap_values[0, i])
+                val = float(contribs_1d[i])
                 if abs(val) > 1e-6:  # only include non-trivial contributions
                     contributions[name] = round(val, 4)
 
