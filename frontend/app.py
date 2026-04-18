@@ -645,7 +645,14 @@ def _deadline_for_result(result: PipelineResult) -> datetime | None:
 
     if not candidates:
         return None
-    return min(candidates)
+
+    # Normalize all to UTC-aware before calling min() — mixing naive and aware
+    # datetimes raises TypeError: "can't compare offset-naive and offset-aware datetimes"
+    aware = [
+        dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+        for dt in candidates
+    ]
+    return min(aware)
 
 
 def _urgency_bucket(deadline: datetime | None, urgency_score: float) -> str:
@@ -1169,7 +1176,7 @@ else:
                 <span class="mbadge {m_cls}">{_safe(match_label.upper())} MATCH</span>
                 <span class="dpill {u_cls}">{u_lbl} &nbsp; {deadline_text}</span>
                 <span style="color:#aab1b8;font-size:0.76rem;">
-                    📌 {type_text} &nbsp;|&nbsp; {location_text}
+                    📌 {location_text} &nbsp;|&nbsp {type_text} 
                 </span>
             </div>
             <p style="color:#b7bec6;font-size:0.84rem;margin:0.35rem 0 0.75rem;">
