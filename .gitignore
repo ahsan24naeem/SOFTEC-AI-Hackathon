@@ -1,0 +1,21 @@
+# ── Python ────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# ── Environment ──────────────────────────────────────
+.env
+
+# ── ML Artifacts ─────────────────────────────────────
+src/models/artifacts/*.pkl
+src/models/artifacts/*.joblib
+
+# ── IDE ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
