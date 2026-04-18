@@ -1,3 +1,4 @@
+import logging
 import sys
 import tempfile
 import re
@@ -11,8 +12,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# ── Configure logging so SHAP/pipeline logs are visible in the terminal ──────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stdout,
+    force=True,  # override any prior config (e.g. from Streamlit's internal setup)
+)
+
 from src.api import EmailController
 from src.models.schemas import PipelineResult, UserProfile
+
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG

@@ -5,6 +5,8 @@ contribution explanations for each scoring dimension.
 
 from __future__ import annotations
 
+import logging
+import traceback
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -15,6 +17,8 @@ from src.models.schemas import SHAPExplanation
 
 if TYPE_CHECKING:
     from src.core.scorer import EnsembleScorer
+
+logger = logging.getLogger(__name__)
 
 
 class SHAPExplainer:
@@ -33,6 +37,7 @@ class SHAPExplainer:
         self._scorer = scorer
         # Cache SHAP TreeExplainers per model key.
         self._explainers: dict[tuple[str, str], shap.TreeExplainer] = {}
+        logger.info("SHAPExplainer initialised  (shap==%s  numpy==%s)", shap.__version__, np.__version__)
 
     def explain(
         self,
@@ -40,7 +45,7 @@ class SHAPExplainer:
         category: str,
     ) -> list[SHAPExplanation]:
         """
-        Return a `SHAPExplanation` for each of urgency / fit / importance.
+        Return a ``SHAPExplanation`` for each of urgency / fit / importance.
 
         Parameters
         ----------
@@ -50,55 +55,83 @@ class SHAPExplainer:
         vec = feature_vector.reshape(1, -1)
         results: list[SHAPExplanation] = []
 
+        logger.info("── SHAP explain  category=%-10s  n_features=%d ──", category, len(FEATURE_NAMES))
+
         for dim in ("urgency", "fit", "importance"):
             key = (category, dim)
-            model = self._scorer.models.get(key) or self._scorer.models.get(
-                ("Misc", dim)
-            )
+            model = self._scorer.models.get(key) or self._scorer.models.get(("Misc", dim))
+
             if model is None:
-                results.append(
-                    SHAPExplanation(
-                        dimension=dim,
-                        base_value=5.0,
-                        feature_contributions={},
-                    )
-                )
+                logger.warning("  [%s/%s] No model found — returning empty explanation", category, dim)
+                results.append(SHAPExplanation(dimension=dim, base_value=5.0, feature_contributions={}))
                 continue
 
-            # Lazily build the TreeExplainer.
+            # Lazily build the TreeExplainer (cached per model key)
             if key not in self._explainers:
                 self._explainers[key] = shap.TreeExplainer(model)
+                logger.debug("  [%s/%s] Built new TreeExplainer", category, dim)
 
             exp = self._explainers[key]
-            shap_values = exp.shap_values(vec, check_additivity=False)
 
-            # ── Normalise shap_values to a 1-D array of length n_features ──
-            # SHAP return shapes vary by version:
-            #   • Old (≤0.44): ndarray shape (n_samples, n_features)
-            #   • New (≥0.45): list of arrays OR ndarray (n_outputs, n_samples, n_features)
+            # ── Call shap_values ────────────────────────────────────────────
+            try:
+                shap_values = exp.shap_values(vec, check_additivity=False)
+            except Exception as exc:
+                logger.error(
+                    "  [%s/%s] shap_values() raised: %s\n%s",
+                    category, dim, exc, traceback.format_exc()
+                )
+                raise
+
+            # ── Diagnose return shape (critical for cross-version compat) ───
             shap_arr = np.array(shap_values)
+            logger.debug(
+                "  [%s/%s] raw type=%-12s  np.array shape=%-20s  ndim=%d",
+                category, dim,
+                type(shap_values).__name__,
+                str(shap_arr.shape),
+                shap_arr.ndim,
+            )
+
+            # ── Normalise to 1-D contribution vector ────────────────────────
+            # SHAP return shapes vary by version:
+            #   Old (≤0.44) : ndarray (n_samples, n_features)           → 2-D
+            #   New (≥0.45) : list or ndarray (n_outputs, n_samples, n_features) → 3-D
             if shap_arr.ndim == 3:
-                # (n_outputs, n_samples, n_features) → take first output, first sample
                 contribs_1d = shap_arr[0, 0, :]
+                logger.debug("  [%s/%s] 3-D → [0,0,:]  (SHAP ≥0.45 multi-output format)", category, dim)
             elif shap_arr.ndim == 2:
-                # (n_samples, n_features) → take first sample
                 contribs_1d = shap_arr[0, :]
+                logger.debug("  [%s/%s] 2-D → [0,:]    (classic SHAP ≤0.44 format)", category, dim)
             elif shap_arr.ndim == 1:
-                # Already 1-D (n_features,)
                 contribs_1d = shap_arr
+                logger.debug("  [%s/%s] 1-D → already flat", category, dim)
             else:
                 contribs_1d = shap_arr.flatten()
+                logger.warning("  [%s/%s] Unexpected ndim=%d — flattening", category, dim, shap_arr.ndim)
 
-            # ── Normalise expected_value to a Python float ──────────────────
-            # Some SHAP versions return an ndarray for expected_value
+            # ── Normalise expected_value to scalar ──────────────────────────
             ev = exp.expected_value
             base = float(np.asarray(ev).flat[0])
+            logger.debug(
+                "  [%s/%s] expected_value raw=%-20s  type=%-12s  → base=%.4f",
+                category, dim, str(ev), type(ev).__name__, base,
+            )
 
+            # ── Build feature contributions dict ────────────────────────────
             contributions: dict[str, float] = {}
             for i, name in enumerate(FEATURE_NAMES):
                 val = float(contribs_1d[i])
-                if abs(val) > 1e-6:  # only include non-trivial contributions
+                if abs(val) > 1e-6:
                     contributions[name] = round(val, 4)
+
+            # ── Log top-3 contributors ──────────────────────────────────────
+            top3 = sorted(contributions.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
+            logger.info(
+                "  ✅ [%s/%-10s]  base=%6.4f   top-3: %s",
+                category, dim, base,
+                " | ".join(f"{n}={v:+.4f}" for n, v in top3) or "—",
+            )
 
             results.append(
                 SHAPExplanation(
@@ -108,4 +141,5 @@ class SHAPExplainer:
                 )
             )
 
+        logger.info("── SHAP complete: %d/3 dimensions computed ──", len(results))
         return results
