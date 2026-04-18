@@ -493,6 +493,9 @@ def _build_user_profile() -> UserProfile:
     skills = list(st.session_state.get("skills", []))
     experiences = list(st.session_state.get("experiences", []))
 
+    # Combine skills and experience descriptions as interest signals for the scorer
+    interests = list(dict.fromkeys(skills + [e.split()[-1] for e in experiences if e.strip()]))
+
     return UserProfile(
         degree_program=degree,
         semester=semester,
@@ -507,7 +510,7 @@ def _build_user_profile() -> UserProfile:
         location=location_pref,
         location_preference=location_pref,
         past_experience=experiences,
-        interests=skills,
+        interests=interests,
     )
 
 
@@ -1062,12 +1065,18 @@ if not st.session_state["analyzed"] and not st.session_state["analyzing"]:
                     st.session_state.get("pasted_input", ""),
                     uploads,
                 )
-                if total_emails < 1 or total_emails > 15:
+                if total_emails < 1:
+                    st.warning("No emails detected. Paste email text or upload at least one file.")
+                elif total_emails > 15:
                     st.warning(
-                        "For the SOFTEC demo, provide between 5 and 15 emails/text notices "
-                        f"(currently detected: {total_emails})."
+                        f"Too many emails detected ({total_emails}). Please provide at most 15 emails/notices."
                     )
                 else:
+                    if total_emails < 5:
+                        st.toast(
+                            f"⚠️ {total_emails} email(s) detected — the demo works best with 5–15.",
+                            icon="⚠️",
+                        )
                     st.session_state["analysis_error"] = None
                     st.session_state["analyzing"] = True
                     st.rerun()

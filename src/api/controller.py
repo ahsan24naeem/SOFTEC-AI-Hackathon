@@ -70,7 +70,7 @@ class EmailController:
         ------
         FileNotFoundError : If the ``.eml`` path doesn't exist.
         ValueError        : If the LLM output is unparsable / invalid.
-        EnvironmentError  : If ``GOOGLE_API_KEY`` is unset.
+        EnvironmentError  : If ``GROQ_API_KEY`` is unset.
         """
         warnings: list[str] = []
         eml_path = Path(eml_path)

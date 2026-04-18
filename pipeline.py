@@ -107,7 +107,7 @@ def main() -> None:
         out.write_text(json_str, encoding="utf-8")
         print(f"✓ Result written to {out}")
     else:
-        print(json_str.keys())
+        print(json_str)
 
 
 if __name__ == "__main__":

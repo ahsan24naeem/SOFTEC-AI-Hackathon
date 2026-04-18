@@ -140,25 +140,34 @@ class FeatureTransformer:
     def _find_earliest_deadline(extracted: BaseEmailData) -> datetime | None:
         """
         Search through next_steps deadlines and key_dates to find the
-        earliest future datetime.
+        earliest future datetime. Handles both timezone-aware and naive datetimes.
         """
         now = datetime.now(timezone.utc)
         candidates: list[datetime] = []
 
+        def _to_aware(dt: datetime) -> datetime:
+            """Return dt as UTC-aware; assume UTC if naive."""
+            return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
         for step in extracted.next_steps:
-            if step.deadline and step.deadline > now:
-                candidates.append(step.deadline)
+            if step.deadline:
+                aware = _to_aware(step.deadline)
+                if aware > now:
+                    candidates.append(aware)
 
         for dt in extracted.key_dates:
-            if dt > now:
-                candidates.append(dt)
+            aware = _to_aware(dt)
+            if aware > now:
+                candidates.append(aware)
 
         # Check subtype-specific deadlines
         if hasattr(extracted, "application_deadline") and extracted.application_deadline:
-            if extracted.application_deadline > now:
-                candidates.append(extracted.application_deadline)
+            aware = _to_aware(extracted.application_deadline)
+            if aware > now:
+                candidates.append(aware)
         if hasattr(extracted, "event_date") and extracted.event_date:
-            if extracted.event_date > now:
-                candidates.append(extracted.event_date)
+            aware = _to_aware(extracted.event_date)
+            if aware > now:
+                candidates.append(aware)
 
         return min(candidates) if candidates else None

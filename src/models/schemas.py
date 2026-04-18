@@ -119,8 +119,8 @@ class BaseEmailData(BaseModel):
     sender: str
     summary: str = Field(..., min_length=10, description="2-3 sentence summary")
     next_steps: list[NextStep] = Field(
-        ..., min_length=1, max_length=3,
-        description="1-3 concrete next actions",
+        ..., min_length=0, max_length=3,
+        description="0-3 concrete next actions (0 for non-opportunity emails)",
     )
     key_dates: list[datetime] = Field(default_factory=list)
     links: list[LinkMetadata] = Field(default_factory=list)
@@ -138,8 +138,8 @@ class BaseEmailData(BaseModel):
 
 class AdmissionEmail(BaseEmailData):
     """Fields specific to university / programme admissions."""
-    university: str = ""
-    programme: str = ""
+    university: Optional[str] = None
+    programme: Optional[str] = None
     application_deadline: Optional[datetime] = None
     requirements: list[str] = Field(default_factory=list)
     scholarship_mentioned: bool = False
